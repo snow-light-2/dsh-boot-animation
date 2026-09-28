@@ -1,0 +1,19 @@
+# Normalize text, but never touch media or the embedded base64 payload.
+* text=auto eol=lf
+
+*.mp4  binary
+*.webm binary
+*.mkv  binary
+*.mov  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ttf  binary
+*.ico  binary
+
+# lib/clips.data.js is a 12 MB base64 payload; line-ending normalization on it
+# is pure risk (and huge diffs). Treat it as an opaque blob.
+lib/clips.data.js -text
+
+# Keep the published build byte-stable.
+lib/*.js -text
