@@ -2,6 +2,11 @@ node_modules/
 *.tgz
 .DS_Store
 
+# The build's scratch directory: tsc emits the host-side settings module here and
+# scripts/build.mjs moves it to lib/settings.shared.mjs, so it must never be
+# committed or mistaken for a real artifact.
+lib/.shared-build/
+
 # 本地备份：原始内置片源的副本，不属于发布内容
 boot.mp4.original-backup
 

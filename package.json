@@ -1,7 +1,7 @@
 {
   "name": "dsh-boot-animation",
-  "version": "0.2.2-fork.1",
-  "description": "打开新对话（或你钉住的会话）时，铺满窗口播放一段片头开机动画。Open a new (or a pinned) DSH conversation and a full-frame intro animation plays.",
+  "version": "0.3.0",
+  "description": "DeepSeek Harness 启动时播放的开机动画（也可用于新对话/钉住的会话）：全屏片头、可跳过、可换自己的片子、可调时长与声音。A boot animation for DeepSeek Harness: a full-frame intro on application start, also usable for new or pinned conversations.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -15,19 +15,22 @@
   ],
   "license": "BSD-3-Clause",
   "author": "NativeDog1",
+  "contributors": [
+    "snow-light-2"
+  ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/NativeDog1/dsh-boot-animation.git"
+    "url": "git+https://github.com/snow-light-2/dsh-boot-animation.git"
   },
-  "homepage": "https://github.com/NativeDog1/dsh-boot-animation#readme",
+  "homepage": "https://github.com/snow-light-2/dsh-boot-animation#readme",
   "fork": {
     "of": "dsh-boot-animation@0.2.2",
     "upstream": "https://github.com/NativeDog1/dsh-boot-animation",
     "maintainer": "snow-light-2",
-    "reason": "Lower dsh.engines.dsh to >=0.1.2-rc.1 so the DSH 0.1.2-rc.1 host accepts it. No source changes. See FORK-NOTES.md."
+    "reason": "0.3.0 turns the intro into a real application-start animation and gives it a settings panel: an appStart trigger told apart from a page reload by the host process id, per-trigger clip choice, duration/sound/skip/layer controls, and conflict fixes against overlay plugins such as dsh-pet (layered pointer events, a non-tied stacking index). See FORK-NOTES.md."
   },
   "bugs": {
-    "url": "https://github.com/NativeDog1/dsh-boot-animation/issues"
+    "url": "https://github.com/snow-light-2/dsh-boot-animation/issues"
   },
   "keywords": [
     "dsh",
@@ -51,15 +54,22 @@
     }
   },
   "devDependencies": {
+    "@types/react": "^18.3.12",
+    "react": "^18.3.1",
     "tsdown": "^0.22.14",
     "typescript": "^5.9.0"
   },
   "scripts": {
-    "build": "bash scripts/build.sh",
+    "build": "node scripts/build.mjs",
+    "build:sh": "bash scripts/build.sh",
     "build:client": "node scripts/check-css-template.mjs && tsdown",
+    "build:shared": "tsc -p tsconfig.shared.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "embed-clips": "node scripts/embed-clips.mjs",
-    "check": "node scripts/check-css-template.mjs && node scripts/verify-routes.mjs",
+    "check": "node scripts/check-css-template.mjs && node scripts/verify-routes.mjs && node scripts/verify-boot.mjs && node scripts/verify-boot-resilience.mjs",
     "verify:routes": "node scripts/verify-routes.mjs",
+    "verify:boot": "node scripts/verify-boot.mjs",
+    "verify:boot-resilience": "node scripts/verify-boot-resilience.mjs",
     "verify:letterbox": "node scripts/verify-letterbox.mjs"
   },
   "exports": {

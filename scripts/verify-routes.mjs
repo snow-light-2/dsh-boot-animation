@@ -18,7 +18,24 @@
  *
  * Usage: node scripts/verify-routes.mjs
  */
-import { apply } from '../lib/index.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+/**
+ * Point the host half at a THROWAWAY harness home.
+ *
+ * `src/host.js` reads `process.env.DSH_HOME` lazily on every request, so setting it
+ * before `apply` (and before any request) keeps this test away from the real
+ * `~/.dsh/boot-animation/settings.json`. A regression test that rewrites the
+ * operator's own configuration is worse than no regression test.
+ */
+const SANDBOX_HOME = mkdtempSync(join(tmpdir(), 'dsh-boot-animation-verify-'))
+process.env.DSH_HOME = SANDBOX_HOME
+
+// Imported AFTER the environment is set, so no module-level read can capture the
+// real home. This is also why the import is not at the top of the file.
+const { apply } = await import('../lib/index.js')
 
 const BASE = '/dsh-boot-animation'
 
@@ -53,8 +70,15 @@ function resolve(pathname) {
   return best
 }
 
-/** Drive one request through the resolved handler. */
-function call(rawUrl, method = 'GET', headers = {}) {
+/**
+ * Drive one request through the resolved handler.
+ *
+ * Bodies are delivered the node:http way, which is what the host's `readBody` is
+ * written against: it attaches `data`/`end` listeners, so a mock that answered
+ * synchronously would never be observed. Events are therefore buffered here and
+ * replayed when the handler subscribes.
+ */
+function call(rawUrl, method = 'GET', headers = {}, body) {
   return new Promise((done) => {
     const pathname = rawUrl.split('?')[0]
     const route = resolve(pathname)
@@ -62,7 +86,24 @@ function call(rawUrl, method = 'GET', headers = {}) {
       done({ code: 404, note: 'NO ROUTE MATCHED' })
       return
     }
-    const req = { method, url: rawUrl, headers, on: () => req, destroy: () => {} }
+    const pending = []
+    const listeners = new Map()
+    const req = {
+      method,
+      url: rawUrl,
+      headers,
+      on(type, listener) {
+        const list = listeners.get(type) ?? []
+        list.push(listener)
+        listeners.set(type, list)
+        // Replay whatever arrived before this listener existed.
+        for (const event of pending.splice(0)) {
+          if (event.type === type) listener(event.payload)
+        }
+        return req
+      },
+      destroy() {},
+    }
     // Text is kept for JSON routes; media bodies are only counted, so a 3MB
     // embedded clip never becomes a JS string in this harness.
     let text = ''
@@ -83,9 +124,9 @@ function call(rawUrl, method = 'GET', headers = {}) {
       on: () => {},
       once: () => {},
       emit: () => {},
-      writeHead(code, headers) {
+      writeHead(code, headers2) {
         this.statusCode = code
-        Object.assign(this.headers, headers ?? {})
+        Object.assign(this.headers, headers2 ?? {})
       },
       end(payload) {
         if (payload !== undefined) {
@@ -100,8 +141,26 @@ function call(rawUrl, method = 'GET', headers = {}) {
       },
     }
     route.handler(req, res)
+    if (body !== undefined) {
+      const emit = (type, payload) => {
+        const list = listeners.get(type)
+        if (list === undefined || list.length === 0) {
+          pending.push({ type, payload })
+          return
+        }
+        for (const listener of list) listener(payload)
+      }
+      // A tick later, so the handler is always the one that attaches first.
+      setTimeout(() => {
+        emit('data', Buffer.from(String(body), 'utf8'))
+        emit('end')
+      }, 0)
+    }
   })
 }
+
+/** A POST with a JSON body. */
+const post = (url, payload) => call(url, 'POST', { 'content-type': 'application/json' }, JSON.stringify(payload))
 
 const failures = []
 const resources = {}
@@ -326,11 +385,127 @@ console.log('\nrevalidation across clips:')
   }
 }
 
+/**
+ * The settings and play-state routes.
+ *
+ * These are the routes that make the plugin configurable, and they are the ones a
+ * user's own `settings.json` lives in - hence the throwaway DSH_HOME at the top of
+ * this file. What is asserted: the plan carries a boot id and every clip's URL, a
+ * settings PATCH merges instead of replacing, out-of-range values are clamped rather
+ * than rejected, unknown keys are dropped, the legacy select file stays in step, the
+ * play counter only moves when the page says so, and a reset cannot be made to
+ * discard settings by accident.
+ */
+console.log('\nsettings and play state:')
+{
+  const plan = JSON.parse((await call(`${BASE}/plan.json`)).body ?? '{}')
+  const okBootId = typeof plan.bootId === 'string' && plan.bootId.length >= 8
+  console.log(`  ${okBootId ? 'ok  ' : 'FAIL'} /plan.json carries a host boot id: ${String(plan.bootId)}`)
+  if (!okBootId) failures.push('the plan must carry a boot id; without it every page load looks like an app start')
+
+  const curated = plan.clipUrls ?? {}
+  const everyClip = ids.every((id) => typeof curated[id] === 'string' && curated[id].includes('/media/'))
+  console.log(
+    `  ${everyClip ? 'ok  ' : 'FAIL'} /plan.json maps every one of ${ids.length} clip(s) to a media URL`,
+  )
+  if (!everyClip) failures.push('the plan must map every clip id to a media URL, or a per-trigger clip cannot resolve')
+
+  const okDefaults = plan.settings?.frequency === 'every' && plan.settings?.enabled === true
+  console.log(
+    `  ${okDefaults ? 'ok  ' : 'FAIL'} /plan.json carries settings (enabled=${String(plan.settings?.enabled)}, frequency=${String(plan.settings?.frequency)})`,
+  )
+  if (!okDefaults) failures.push('the plan must carry the resolved settings')
+
+  const okAppStart = Array.isArray(plan.settings?.triggers) && plan.settings.triggers.includes('appStart')
+  console.log(
+    `  ${okAppStart ? 'ok  ' : 'FAIL'} the default trigger set includes appStart: ${JSON.stringify(plan.settings?.triggers)}`,
+  )
+  if (!okAppStart) failures.push('appStart must be a default trigger; it is the feature this plugin exists for')
+
+  // A PATCH merges: one key changes, the rest must survive.
+  const before = JSON.parse((await call(`${BASE}/settings.json`)).body ?? '{}').settings
+  const patched = JSON.parse((await post(`${BASE}/settings.json`, { title: '冒烟测试' })).body ?? '{}')
+  const okMerge = patched.settings?.title === '冒烟测试' && patched.settings?.frequency === before.frequency
+  console.log(`  ${okMerge ? 'ok  ' : 'FAIL'} a settings PATCH merges instead of replacing`)
+  if (!okMerge) failures.push('a settings PATCH must merge; replacing would discard every untouched key')
+
+  // Out of range clamps, and unknown keys are dropped.
+  const clamped = JSON.parse((await post(`${BASE}/settings.json`, { delayMs: 999999, nonsense: true })).body ?? '{}')
+  const okClamp = clamped.settings?.delayMs === 10000 && clamped.settings?.nonsense === undefined
+  console.log(`  ${okClamp ? 'ok  ' : 'FAIL'} out-of-range values clamp and unknown keys are dropped (delayMs=${String(clamped.settings?.delayMs)})`)
+  if (!okClamp) failures.push('delayMs must clamp to its declared maximum and unknown keys must not persist')
+
+  // A malformed trigger list is filtered, not trusted.
+  const badTriggers = JSON.parse(
+    (await post(`${BASE}/settings.json`, { triggers: ['appStart', 'not-a-trigger'] })).body ?? '{}',
+  )
+  const okTriggers =
+    JSON.stringify(badTriggers.settings?.triggers) === JSON.stringify(['appStart'])
+  console.log(`  ${okTriggers ? 'ok  ' : 'FAIL'} unknown trigger names are dropped: ${JSON.stringify(badTriggers.settings?.triggers)}`)
+  if (!okTriggers) failures.push('an unknown trigger name must be dropped rather than stored')
+
+  // A bad body is a 400, and never a 500 from an unhandled throw.
+  const badBody = await call(`${BASE}/settings.json`, 'POST', {}, 'not json')
+  console.log(`  ${badBody.code === 400 ? 'ok  ' : 'FAIL'} a non-JSON body -> ${badBody.code} (want 400)`)
+  if (badBody.code !== 400) failures.push(`a non-JSON settings body answered ${badBody.code}, want 400`)
+
+  const getOnly = await call(`${BASE}/reset`, 'GET')
+  console.log(`  ${getOnly.code === 405 ? 'ok  ' : 'FAIL'} GET /reset -> ${getOnly.code} (want 405)`)
+  if (getOnly.code !== 405) failures.push(`GET /reset answered ${getOnly.code}, want 405`)
+
+  // Selecting a clip keeps the historical file in step, so a rollback still sees it.
+  const pick = JSON.parse((await post(`${BASE}/select`, { id: ids[1] })).body ?? '{}')
+  const state = JSON.parse((await call(`${BASE}/status.json`)).body ?? '{}')
+  const okPick = pick.ok === true && state.settings?.clipId === ids[1] && state.active?.id === ids[1]
+  console.log(`  ${okPick ? 'ok  ' : 'FAIL'} POST /select updates settings and the active clip (${String(state.active?.id)})`)
+  if (!okPick) failures.push('POST /select must update both settings.json and the resolved active clip')
+
+  const unknown = await post(`${BASE}/select`, { id: 'nope' })
+  console.log(`  ${unknown.code === 404 ? 'ok  ' : 'FAIL'} POST /select with an unknown id -> ${unknown.code} (want 404)`)
+  if (unknown.code !== 404) failures.push(`an unknown select id answered ${unknown.code}, want 404`)
+
+  // The play counter moves only when the page reports a play.
+  const runsBefore = JSON.parse((await call(`${BASE}/status.json`)).body ?? '{}').state?.runs ?? 0
+  const played = JSON.parse((await post(`${BASE}/state`, { clipId: ids[0], conversationId: 'conv-1' })).body ?? '{}')
+  const okRuns = played.state?.runs === runsBefore + 1 && typeof played.state?.ranAt === 'string'
+  console.log(`  ${okRuns ? 'ok  ' : 'FAIL'} POST /state records a play (runs ${String(runsBefore)} -> ${String(played.state?.runs)})`)
+  if (!okRuns) failures.push('POST /state must increment the run counter and stamp the time from the server clock')
+
+  // frequency=once must stop the intro, and reset must restore it.
+  await post(`${BASE}/settings.json`, { frequency: 'once' })
+  const afterReset = JSON.parse((await post(`${BASE}/reset`, { what: 'state' })).body ?? '{}')
+  const okReset = afterReset.ok === true && afterReset.state?.runs === 0 && afterReset.state?.ranAt === null
+  console.log(`  ${okReset ? 'ok  ' : 'FAIL'} POST /reset clears the play history`)
+  if (!okReset) failures.push('POST /reset must clear the play history')
+
+  const keptSettings = afterReset.settings?.frequency === 'once'
+  console.log(`  ${keptSettings ? 'ok  ' : 'FAIL'} POST /reset keeps the settings (frequency=${String(afterReset.settings?.frequency)})`)
+  if (!keptSettings) failures.push('a state reset must not touch the user settings')
+
+  // `all` is the deliberate wide reset, and it must restore the shipped defaults.
+  const wiped = JSON.parse((await post(`${BASE}/reset`, { what: 'all' })).body ?? '{}')
+  const okAll = wiped.ok === true && wiped.settings?.frequency === 'every' && wiped.settings?.title === ''
+  console.log(`  ${okAll ? 'ok  ' : 'FAIL'} POST /reset {what:"all"} restores the defaults (frequency=${String(wiped.settings?.frequency)})`)
+  if (!okAll) failures.push('a full reset must restore the shipped defaults')
+
+  const badWhat = await post(`${BASE}/reset`, { what: 'everything' })
+  console.log(`  ${badWhat.code === 400 ? 'ok  ' : 'FAIL'} POST /reset with an unknown scope -> ${badWhat.code} (want 400)`)
+  if (badWhat.code !== 400) failures.push(`an unknown reset scope answered ${badWhat.code}, want 400`)
+
+  // A GET on the settings route is the panel's read path, not a 405.
+  const readSettings = await call(`${BASE}/settings.json`)
+  const okRead = readSettings.code === 200 && JSON.parse(readSettings.body ?? '{}').settings !== undefined
+  console.log(`  ${okRead ? 'ok  ' : 'FAIL'} GET /settings.json returns the panel payload (${readSettings.code})`)
+  if (!okRead) failures.push('GET on the settings route must return the panel payload')
+}
+
 console.log('')
 if (failures.length === 0) {
   console.log('all route checks passed')
+  rmSync(SANDBOX_HOME, { recursive: true, force: true })
   process.exit(0)
 }
 console.log(`${failures.length} route check(s) failed:`)
 for (const f of failures) console.log('  - ' + f)
+rmSync(SANDBOX_HOME, { recursive: true, force: true })
 process.exit(1)

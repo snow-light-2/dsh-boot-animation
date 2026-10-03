@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowJs": false,
+    "declaration": false,
+    "sourceMap": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "outDir": "lib/.shared-build",
+    "rootDir": "src/shared"
+  },
+  "include": ["src/shared/settings.ts"]
+}
