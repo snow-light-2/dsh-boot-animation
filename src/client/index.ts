@@ -28,7 +28,8 @@
  */
 
 import type { ReactElement } from 'react'
-import { createElement as h, useState } from 'react'
+import { createElement as h } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
 
 import { open, refreshConfig, installBridge, noteSession, triggerLaunch } from './boot-overlay.js'
 import { fetchConfig } from './api.js'
@@ -136,30 +137,12 @@ export function apply(ctx: ClientContext): void {
   // One seat. `sidebar.footer.action` is a list slot, so it coexists with the pet
   // pin and the doctor button instead of competing with them for a single seat.
   //
-  // The registered component holds the open/closed state itself and renders the
-  // panel as an ELEMENT. It is never called as a plain function: calling a
-  // component directly would run the panel's hooks against this component's hook
-  // list, so opening the dialog would change the hook count between renders and
-  // React would throw "Rendered more hooks than during the previous render".
+  // The slot holds ONLY the button. The dialog is mounted into `document.body`
+  // through its own React root (`openPanel`), for the same reason the intro is:
+  // a dialog rendered inside the sidebar's DOM subtree is positioned and clipped
+  // by that subtree (the shell's overflow/transform context), which showed up as
+  // "the panel is covered and the bottom settings are off screen".
   const SidebarEntry = (): ReactElement => {
-    const [panelOpen, setPanelOpen] = useState(false)
-
-    if (panelOpen) {
-      return h(SettingsPanel, {
-        onClose: () => setPanelOpen(false),
-        onPreview: (clipId: string | null) => {
-          setPanelOpen(false)
-          // Close first, then play: the intro must not appear underneath its own
-          // settings dialog. The delay lets React commit the close before the
-          // overlay covers the frame.
-          window.setTimeout(() => {
-            if (clipId === null) open('preview')
-            else void previewClipById(clipId)
-          }, 80)
-        },
-      })
-    }
-
     return h(
       'button',
       {
@@ -168,7 +151,16 @@ export function apply(ctx: ClientContext): void {
         style: { width: '28px', height: '28px', padding: '0', borderRadius: '8px', border: '0' },
         title: '片头动画：设置什么时候播、怎么播、播哪一段',
         'aria-label': '片头动画设置',
-        onClick: () => setPanelOpen(true),
+        onClick: () => {
+          openPanel((clipId: string | null) => {
+            // Close first, then play: the intro must not appear underneath its own
+            // settings dialog. The delay lets React commit the unmount first.
+            window.setTimeout(() => {
+              if (clipId === null) open('preview')
+              else void previewClipById(clipId)
+            }, 80)
+          })
+        },
       },
       '🎬',
     )
@@ -219,4 +211,48 @@ async function previewClipById(clipId: string): Promise<void> {
     /* fall back to the unpinned URL */
   }
   open('preview', url)
+}
+
+/**
+ * The open settings dialog, if there is one. One at a time, mounted on
+ * `document.body` through its own React root.
+ *
+ * Why not render it inside the sidebar slot: a dialog inherits its DOM ancestor's
+ * positioning and clipping. Inside the sidebar the shell's own overflow/transform
+ * context applied, and the user saw exactly that - the panel was partly covered,
+ * the page behind it never dimmed, and the lower settings (片头时长 / 看门狗超时)
+ * sat below the bottom edge of the window with no way to reach them.
+ */
+let panelHost: { host: HTMLElement; root: Root } | null = null
+
+/** Tear the dialog down. Deferred, because it is called from the panel's own events. */
+function closePanel(): void {
+  if (panelHost === null) return
+  const { host, root } = panelHost
+  panelHost = null
+  // Unmounting a root synchronously from inside that root's event handler is not
+  // safe in React 18+, so let the current event finish first.
+  window.setTimeout(() => {
+    root.unmount()
+    host.remove()
+  }, 0)
+}
+
+/** Open the dialog on `document.body`. */
+function openPanel(onPreview: (clipId: string | null) => void): void {
+  if (panelHost !== null) closePanel()
+  const host = document.createElement('div')
+  host.className = 'dba-panel-host'
+  document.body.appendChild(host)
+  const root = createRoot(host)
+  panelHost = { host, root }
+  root.render(
+    h(SettingsPanel, {
+      onClose: () => closePanel(),
+      onPreview: (clipId: string | null) => {
+        closePanel()
+        onPreview(clipId)
+      },
+    }),
+  )
 }

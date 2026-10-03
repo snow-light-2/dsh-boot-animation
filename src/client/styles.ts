@@ -67,14 +67,28 @@ export const CSS = `
 .dba-countdown-fill{height:100%;width:100%;background:rgba(255,255,255,.72);
   transform-origin:left center;transform:scaleX(1)}
 /* --- settings panel ------------------------------------------------------ */
+/* 面板由 index.ts 挂到 document.body（React root），所以这里的 position:fixed 真的以
+   视口为参照：放进侧栏插槽时，外壳的 overflow/transform 会把它裁掉，实测表现为
+   "右边没变暗、底部设置跑到屏幕外"。
+   高度用百分比而不是 vh：系统缩放较大时 vh 与实际可视高度不一致（面板会被顶出屏幕）。 */
 .dba-veil{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.46);
-  display:flex;align-items:center;justify-content:center;padding:24px;
-  pointer-events:auto}
-.dba-lib{width:min(680px,100%);max-height:min(84vh,760px);overflow:auto;
+  display:flex;align-items:center;justify-content:center;padding:min(4vh,28px) 16px;
+  pointer-events:auto;overflow:hidden}
+.dba-lib{width:min(980px,100%);max-height:100%;display:flex;flex-direction:column;
+  overflow:hidden;
   background:var(--dsw-alias-bg-elevated,#fff);color:var(--dsw-alias-text-primary,#191919);
-  border:1px solid rgba(127,127,127,.28);border-radius:14px;padding:18px 18px 14px;
+  border:1px solid rgba(127,127,127,.28);border-radius:14px;padding:0;
   box-shadow:0 18px 60px rgba(0,0,0,.34);font-family:inherit;
   font-size:13px;line-height:1.55}
+/* 三段式：头（标题/当前会播/页签）与底（操作按钮/提示）固定，只有中间滚动 ——
+   这样无论窗口多小，"片头时长/看门狗超时"这些都能滚到，按钮也始终点得到。 */
+.dba-head{flex:0 0 auto;padding:18px 18px 0;border-bottom:1px solid rgba(127,127,127,.18)}
+.dba-body{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;
+  padding:0 18px 8px}
+.dba-foot{flex:0 0 auto;padding:0 18px 12px;border-top:1px solid rgba(127,127,127,.18);
+  background:var(--dsw-alias-bg-elevated,#fff)}
+@media (max-width:820px){ .dba-tabs{flex-wrap:wrap} .dba-note{margin-left:0} }
+@media (max-height:560px){ .dba-head{padding-top:12px} .dba-lib{font-size:12.5px} }
 .dba-lib h3{margin:0 0 4px;font-size:15px;font-weight:600}
 .dba-lib h4{margin:16px 0 8px;font-size:12.5px;font-weight:600;
   color:var(--dsw-alias-text-secondary,#777);text-transform:uppercase;letter-spacing:.08em}

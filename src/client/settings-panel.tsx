@@ -445,7 +445,11 @@ export function SettingsPanel({
           void acceptFile(event.dataTransfer?.files?.[0] ?? null)
         },
       },
-      h('h3', null, '片头动画设置'),
+      // 三段式布局的第一段：标题 + 当前会播 + 页签（固定，不随内容滚动）
+      h(
+        'div',
+        { className: 'dba-head' },
+        h('h3', null, '片头动画设置'),
       h(
         'p',
         null,
@@ -473,7 +477,13 @@ export function SettingsPanel({
             label,
           ),
         ),
+        ),
       ),
+
+      // 中间可滚动区：三个页签的全部内容都在这里（滚到底就是最后一项设置）
+      h(
+        'div',
+        { className: 'dba-body' },
 
       settings === null
         ? h('div', { className: 'dba-item' }, h('span', { className: 'dba-nm' }, '读取中…'))
@@ -980,6 +990,12 @@ export function SettingsPanel({
           )
         : null,
 
+      ),
+
+      // 第三段：固定底栏（试播/重置/刷新/复制诊断/关闭 + 提示文字）永远可见
+      h(
+        'div',
+        { className: 'dba-foot' },
       h(
         'div',
         { className: 'dba-bar' },
@@ -1039,7 +1055,8 @@ export function SettingsPanel({
         ),
         h('button', { type: 'button', className: 'dba-btn dba-panel', onClick: onClose }, '关闭'),
       ),
-      h('div', { className: 'dba-msg ' + msg.kind }, msg.text),
+        h('div', { className: 'dba-msg ' + msg.kind }, msg.text),
+      ),
     ),
   )
 }
