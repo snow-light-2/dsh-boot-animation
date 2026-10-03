@@ -127,7 +127,12 @@ export const SETTINGS_LIMITS: SettingsLimits = Object.freeze({
   videoOpacity: Object.freeze({ min: 0, max: 100, step: 1 }),
   skipAfterMs: Object.freeze({ min: 0, max: 20000, step: 500 }),
   playCount: Object.freeze({ min: 1, max: 999, step: 1 }),
-  zIndex: Object.freeze({ min: 1, max: 2147483647, step: 1 }),
+  // min must stay 0: `0` is the documented sentinel for "use the layer default"
+  // (see BootSettings.zIndex). With min 1, `mergeSettings` clamps the fallback
+  // default 0 up to 1, `resolvedZIndex` then returns 1 instead of the layer
+  // default, and the intro is stacked *behind* the app shell - it plays but is
+  // invisible. Regression covered by scripts/verify-boot.mjs.
+  zIndex: Object.freeze({ min: 0, max: 2147483647, step: 1 }),
   stallTimeoutMs: Object.freeze({ min: 5000, max: 120000, step: 1000 }),
   title: Object.freeze({ maxLength: 120 }),
   subtitle: Object.freeze({ maxLength: 200 }),

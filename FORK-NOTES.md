@@ -2,11 +2,35 @@
 
 上游：[`NativeDog1/dsh-boot-animation`](https://github.com/NativeDog1/dsh-boot-animation)
 分支维护者：`snow-light-2`
-基线版本：`0.2.2`　当前版本：**`0.3.0`**
+基线版本：`0.2.2`　当前版本：**`0.3.1`**
 
 这个仓库的起点是上游 0.2.2 的完整副本。0.2.2-fork.1 只改了两行 `package.json`
 （放开版本闸门）；**0.3.0 是真正的功能改造**：把片头从「进对话时播」变成
 「**DeepSeek Harness 启动时播**」，并解决与桌宠等浮层插件的冲突。
+0.3.1 修掉 0.3.0 引入的堆叠层级回归（见下）。
+
+---
+
+## 0.3.1 改了什么
+
+### 修掉「启动时其实播了，但被界面盖住看不见」
+
+**症状**：应用启动后宿主确实记录了一次播放（`$DSH_HOME/boot-animation/state.json`
+里 `runs` +1、`ranAt` 是启动时刻），但屏幕上什么都看不到。
+
+**根因**：`BootSettings.zIndex` 的语义是「`0` = 用层级默认值」，但
+`SETTINGS_LIMITS.zIndex` 的下限写成了 `1`。`mergeSettings` 里
+`pick('zIndex')` 在字段缺省时返回默认值 `0`（一个有限数），紧接着被
+`clampNumber` 按 `min: 1` 夹成 `1` —— 于是 `resolvedZIndex()` 永远返回自定义值
+`1`，而不是 `overlay` 层的 `2147483600`，片头被排在应用界面**下面**（桌面端界面
+的层级远高于 1），表现为"播了但看不见"。
+
+**改法**：
+
+- `src/shared/settings.ts`：`zIndex` 下限改回 `0`（哨兵值必须能穿过校验，
+  否则「自动」这个档位等于不存在）；
+- `scripts/verify-routes.mjs`：新增回归断言 —— 默认设置必须保持 `zIndex: 0`
+  且 `resolvedZIndex` 高于桌宠的 `2147483000`。这条断言在旧代码下会失败。
 
 ---
 

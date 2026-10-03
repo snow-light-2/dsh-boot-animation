@@ -36,6 +36,9 @@ process.env.DSH_HOME = SANDBOX_HOME
 // Imported AFTER the environment is set, so no module-level read can capture the
 // real home. This is also why the import is not at the top of the file.
 const { apply } = await import('../lib/index.js')
+// The stacking rule lives in the shared module the host merges through, so a
+// regression here is only visible by asking the shared resolver, not the route.
+const { resolvedZIndex } = await import('../lib/settings.shared.mjs')
 
 const BASE = '/dsh-boot-animation'
 
@@ -421,6 +424,19 @@ console.log('\nsettings and play state:')
     `  ${okAppStart ? 'ok  ' : 'FAIL'} the default trigger set includes appStart: ${JSON.stringify(plan.settings?.triggers)}`,
   )
   if (!okAppStart) failures.push('appStart must be a default trigger; it is the feature this plugin exists for')
+
+  // Regression (2026-10-04): `zIndex: 0` is the sentinel for "use the layer
+  // default". When the zIndex clamp floor was 1, `mergeSettings` raised the
+  // shipped default 0 to 1, `resolvedZIndex` returned 1 instead of the overlay
+  // layer default, and the intro was stacked BEHIND the app shell: the host
+  // recorded a play, the user saw nothing.
+  const defaultZ = plan.settings?.zIndex
+  const resolvedZ = resolvedZIndex(plan.settings ?? {})
+  const okZIndex = defaultZ === 0 && resolvedZ > 2147483000
+  console.log(
+    `  ${okZIndex ? 'ok  ' : 'FAIL'} the default stacking index keeps the "auto" sentinel (zIndex=${String(defaultZ)} -> ${resolvedZ})`,
+  )
+  if (!okZIndex) failures.push('the shipped default zIndex must stay 0 (auto) and resolve above the desktop pet (2147483000)')
 
   // A PATCH merges: one key changes, the rest must survive.
   const before = JSON.parse((await call(`${BASE}/settings.json`)).body ?? '{}').settings

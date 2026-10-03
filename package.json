@@ -1,6 +1,6 @@
 {
   "name": "dsh-boot-animation",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "DeepSeek Harness 启动时播放的开机动画（也可用于新对话/钉住的会话）：全屏片头、可跳过、可换自己的片子、可调时长与声音。A boot animation for DeepSeek Harness: a full-frame intro on application start, also usable for new or pinned conversations.",
   "type": "module",
   "main": "./lib/index.js",
