@@ -127,6 +127,18 @@ export const CSS = `
 .dba-tab{border:0;background:transparent;color:var(--dsw-alias-text-secondary,#777);
   font-family:inherit;font-size:12.5px;padding:6px 10px;cursor:pointer;border-bottom:2px solid transparent}
 .dba-tab.dba-on{color:var(--dsw-alias-text-primary,#191919);border-bottom-color:#07974b;font-weight:600}
+/* --- upload + inline preview (0.3.2) ------------------------------------- */
+/* The player is why this panel exists: comparing clips used to mean playing each
+   one full screen, which is the one view in which a clip cannot be compared. */
+.dba-upload{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px}
+.dba-preview{width:100%;max-height:min(46vh,420px);background:#000;border-radius:10px;
+  border:1px solid rgba(127,127,127,.28);margin:6px 0 4px;display:block}
+.dba-preview-cap{display:flex;align-items:center;gap:8px;margin:0 0 8px}
+/* Whole-dialog drop target: the drop hint has to be unmissable, because a file
+   dropped outside the modal is opened by the browser instead of uploaded. */
+.dba-lib.dba-drop-hot{outline:2px dashed rgba(7,193,96,.75);outline-offset:-6px;
+  background:rgba(7,193,96,.06)}
+.dba-btn:disabled{opacity:.5;cursor:not-allowed}
 `
 
 /** Inject the sheet once. Idempotent, so a second call is free. */

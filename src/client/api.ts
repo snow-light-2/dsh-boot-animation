@@ -28,6 +28,8 @@ export const ROUTES = {
   reset: '/dsh-boot-animation/reset',
   /** Diagnostics. */
   status: '/dsh-boot-animation/status.json',
+  /** One clip, uploaded as the raw POST body; the file name travels in `?name=`. */
+  upload: '/dsh-boot-animation/upload',
 } as const
 
 /** One clip as `/settings.json` reports it. */
@@ -37,6 +39,8 @@ export type ClipEntry = {
   source: string
   bytes: number
   version: string | null
+  /** False when the clip's index is not at the front, so the first frame may lag. */
+  faststart?: boolean
   urls: { media: string; active: string }
 }
 
@@ -72,6 +76,8 @@ export type ConfigPayload = {
   accepts: string[]
   limits: SettingsLimits
   defaults: BootSettings
+  /** Ceiling for one uploaded clip, so the panel can refuse before sending it. */
+  maxUploadBytes: number
 }
 
 /**
@@ -178,4 +184,49 @@ export function mediaUrlFor(clip: ClipEntry): string {
 /** `/status.json` as a diagnostic helper for the panel's "澶嶅埗璇婃柇" action. */
 export function fetchStatus(): Promise<unknown> {
   return getJson(ROUTES.status)
+}
+
+/** What `/upload` answers: the stored clip, or why it was refused. */
+export type UploadResult = {
+  ok: boolean
+  error?: string
+  file?: string
+  id?: string | null
+  name?: string
+  bytes?: number
+  userDir?: string
+  maxBytes?: number
+}
+
+/**
+ * Upload one clip as the raw request body.
+ *
+ * XHR rather than fetch on purpose: `upload.onprogress` is the only way to show
+ * how far a 200 MB clip has got, and a progress bar is the difference between
+ * "it is working" and "it is stuck" for a file that takes a minute.
+ */
+export function uploadVideo(
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<UploadResult> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('POST', `${ROUTES.upload}?name=${encodeURIComponent(file.name)}`)
+    request.setRequestHeader('content-type', 'application/octet-stream')
+    request.upload.onprogress = (event) => {
+      if (onProgress !== undefined && event.lengthComputable && event.total > 0) {
+        onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)))
+      }
+    }
+    request.onload = () => {
+      try {
+        resolve(JSON.parse(request.responseText) as UploadResult)
+      } catch {
+        reject(new Error(`上传接口返回了非 JSON（HTTP ${String(request.status)}）`))
+      }
+    }
+    request.onerror = () => reject(new Error('上传失败：网络错误'))
+    request.onabort = () => reject(new Error('上传已取消'))
+    request.send(file)
+  })
 }

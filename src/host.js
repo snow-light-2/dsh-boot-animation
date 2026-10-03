@@ -39,6 +39,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   createReadStream,
+  createWriteStream,
+  existsSync,
   mkdirSync,
   openSync,
   readSync,
@@ -47,6 +49,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -84,9 +87,21 @@ const SETTINGS_ROUTE = BASE_ROUTE + '/settings.json'
 const STATE_ROUTE = BASE_ROUTE + '/state'
 const RESET_ROUTE = BASE_ROUTE + '/reset'
 const PLAN_ROUTE = BASE_ROUTE + '/plan.json'
+/** One clip, uploaded as the raw POST body; the file name travels in `?name=`. */
+const UPLOAD_ROUTE = BASE_ROUTE + '/upload'
 const CONTENT_TYPE = 'video/mp4'
 /** Upper bound on a settings POST body. Nothing here is big enough to need more. */
 const MAX_BODY_BYTES = 32768
+
+/**
+ * Upper bound on one uploaded clip.
+ *
+ * 256 MB fits a few minutes of 1080p. It is deliberately NOT unbounded: this
+ * route writes to the operator's disk on behalf of a request any local page can
+ * send, so a stuck retry loop must not be able to fill the volume. A larger clip
+ * goes in through the folder instead of through the panel.
+ */
+const MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 
 /** Extensions treated as video for listing purposes. */
 const VIDEO_EXT = new Set(['.mp4', '.m4v', '.webm', '.mov', '.mkv'])
@@ -604,6 +619,13 @@ function previewEntry(v) {
     source: v.source,
     bytes: v.bytes,
     version,
+    /**
+     * Carried so the panel can warn about a clip whose index sits at the end of
+     * the file: it still plays (the overlay has a stall watchdog), but the first
+     * frame can take a moment, and "why is it black for two seconds" is the
+     * question every user asks once.
+     */
+    faststart: v.faststart === true,
     urls: {
       media: MEDIA_ROUTE + '/' + encodeURIComponent(v.id) + query(version),
       active: ROUTE + query(version),
@@ -629,6 +651,8 @@ function serveConfig(res) {
     accepts: [...VIDEO_EXT],
     limits: SETTINGS_LIMITS,
     defaults: DEFAULT_SETTINGS,
+    /** What the panel quotes next to its file picker, and refuses past. */
+    maxUploadBytes: MAX_UPLOAD_BYTES,
   })
 }
 
@@ -1006,7 +1030,190 @@ function handleSelect(req, res) {
   })
 }
 
-/** GET /settings.json 鈥?settings, play state, clips and the ranges the panel needs. */
+/**
+ * Turn a browser-supplied file name into a safe leaf name plus its extension.
+ *
+ * The name comes from the client, so it is treated as hostile: directory
+ * separators are dropped (a name must never pick the directory), control
+ * characters and everything outside a conservative allowlist become '-', leading
+ * dots go away so no dotfile or traversal name survives, and the stem is capped.
+ * The extension is lower-cased and validated by the caller against VIDEO_EXT -
+ * that check is what decides whether the upload is a clip at all.
+ */
+function safeUploadName(raw) {
+  const leaf = String(raw ?? '').split(/[\\/]/).pop() ?? ''
+  const ext = extname(leaf).toLowerCase()
+  const stem = basename(leaf, extname(leaf))
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[^0-9A-Za-z\u4e00-\u9fff._ -]/g, '-')
+    .replace(/^[.\s]+/, '')
+    .replace(/[\s.]+$/, '')
+    .slice(0, 80)
+  return { stem: stem === '' ? 'clip' : stem, ext }
+}
+
+/** A path in `dir` that does not exist yet: `stem.ext`, then `stem-2.ext`, ... */
+function uniqueUploadPath(dir, stem, ext) {
+  for (let n = 1; n <= 200; n += 1) {
+    const candidate = join(dir, n === 1 ? stem + ext : stem + '-' + String(n) + ext)
+    if (!existsSync(candidate)) return candidate
+  }
+  throw new Error('that name already has 200 copies')
+}
+
+/**
+ * Whether a browser-issued request came from this same origin.
+ *
+ * The DSH webserver listens on 127.0.0.1, which every page in the browser can
+ * reach. Every other route here is harmless when a stranger calls it; this one
+ * writes a file, so a cross-site POST is refused on both signals a browser
+ * actually sends: `sec-fetch-site` when present, and `origin` when present.
+ * A missing header (curl, a test) is allowed on purpose - the check is about
+ * browsers, not about locking the operator's own tools out.
+ */
+function sameOrigin(req) {
+  const site = String(req.headers['sec-fetch-site'] ?? '')
+  if (site !== '' && site !== 'same-origin' && site !== 'none') return false
+  const origin = String(req.headers.origin ?? '')
+  if (origin === '' || origin === 'null') return true
+  try {
+    const host = new URL(origin).hostname
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * POST /upload?name=<file name>  -  one clip, as the raw request body.
+ *
+ * This is the panel's "choose a file / drop a file" path, and it is the only
+ * route here that writes a file the operator will later play, so every rule
+ * below exists for that reason:
+ *
+ *   - POST only;
+ *   - same-origin only (see sameOrigin);
+ *   - the name is sanitized and its extension must be servable (VIDEO_EXT), so
+ *     the clip library cannot be used as a generic file drop;
+ *   - the bytes stream into `<target>.part` inside the destination directory and
+ *     are published with a rename, so an interrupted upload never leaves a half
+ *     file that the library would list and then fail to play;
+ *   - the count is capped at MAX_UPLOAD_BYTES and a body past the cap answers 413
+ *     with the part file removed.
+ */
+function handleUpload(req, res) {
+  if (req.method !== 'POST') {
+    sendJson(res, { ok: false, error: 'POST required' }, 405)
+    return
+  }
+  if (!sameOrigin(req)) {
+    sendJson(res, { ok: false, error: 'cross-site upload refused' }, 403)
+    return
+  }
+  const raw = typeof req.url === 'string' ? req.url : ''
+  let wanted
+  try {
+    wanted = safeUploadName(new URL(raw, 'http://127.0.0.1').searchParams.get('name'))
+  } catch {
+    sendJson(res, { ok: false, error: 'could not read the file name' }, 400)
+    return
+  }
+  if (!VIDEO_EXT.has(wanted.ext)) {
+    sendJson(
+      res,
+      {
+        ok: false,
+        error: 'unsupported file type ' + (wanted.ext === '' ? '(none)' : wanted.ext),
+        accepts: [...VIDEO_EXT],
+      },
+      415,
+    )
+    return
+  }
+  const dir = join(HOME_DIR(), 'videos')
+  let target
+  try {
+    mkdirSync(dir, { recursive: true })
+    target = uniqueUploadPath(dir, wanted.stem, wanted.ext)
+  } catch (error) {
+    sendJson(
+      res,
+      { ok: false, error: 'could not prepare the video folder: ' + String(error?.message ?? error) },
+      500,
+    )
+    return
+  }
+
+  const part = target + '.part'
+  const out = createWriteStream(part)
+  let written = 0
+  let refused = false
+
+  const dropPart = () => {
+    try {
+      unlinkSync(part)
+    } catch {
+      /* already gone */
+    }
+  }
+
+  req.on('data', (chunk) => {
+    if (refused) return
+    written += chunk.length
+    if (written > MAX_UPLOAD_BYTES) {
+      refused = true
+      req.destroy()
+      out.destroy()
+      dropPart()
+      sendJson(res, { ok: false, error: 'file too large', maxBytes: MAX_UPLOAD_BYTES }, 413)
+      return
+    }
+    // Manual backpressure: without it a fast client and a slow disk buffer the
+    // whole clip in memory, which for a 256 MB upload is the whole point of the cap.
+    if (!out.write(chunk)) {
+      req.pause()
+      out.once('drain', () => req.resume())
+    }
+  })
+  req.on('aborted', () => {
+    refused = true
+    out.destroy()
+    dropPart()
+  })
+  req.on('error', () => {
+    refused = true
+    out.destroy()
+    dropPart()
+  })
+  req.on('end', () => {
+    if (refused) return
+    out.end(() => {
+      try {
+        renameSync(part, target)
+      } catch (error) {
+        dropPart()
+        sendJson(
+          res,
+          { ok: false, error: 'could not store the clip: ' + String(error?.message ?? error) },
+          500,
+        )
+        return
+      }
+      const fileName = basename(target)
+      const video = listVideos().find((v) => v.file === fileName) ?? null
+      sendJson(res, {
+        ok: true,
+        file: fileName,
+        id: video === null ? null : video.id,
+        name: video === null ? fileName : video.name,
+        bytes: written,
+        userDir: dir,
+      })
+    })
+  })
+}
+
+/** GET /settings.json - settings, play state, clips and the ranges the panel needs. */
 function serveSettings(res) {
   serveConfig(res)
 }
@@ -1204,6 +1411,10 @@ export function apply(ctx) {
   ctx.effect(
     () => ctx.webServer.register({ kind: 'prefix', path: PLAN_ROUTE, handler: (_req, res) => servePlan(res) }),
     'dsh-boot-animation: play plan',
+  )
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'prefix', path: UPLOAD_ROUTE, handler: handleUpload }),
+    'dsh-boot-animation: upload a clip',
   )
   // One line at boot so an operator can see the resolved configuration in the
   // harness log without opening the GUI.

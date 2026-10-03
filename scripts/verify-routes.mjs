@@ -106,6 +106,14 @@ function call(rawUrl, method = 'GET', headers = {}, body) {
         return req
       },
       destroy() {},
+      // Real IncomingMessage methods: the upload route pauses the socket when the
+      // disk falls behind, so a mock without them would throw on a large body.
+      pause() {
+        return req
+      },
+      resume() {
+        return req
+      },
     }
     // Text is kept for JSON routes; media bodies are only counted, so a 3MB
     // embedded clip never becomes a JS string in this harness.
@@ -155,7 +163,8 @@ function call(rawUrl, method = 'GET', headers = {}, body) {
       }
       // A tick later, so the handler is always the one that attaches first.
       setTimeout(() => {
-        emit('data', Buffer.from(String(body), 'utf8'))
+        // Buffers pass through untouched so the upload tests can send real bytes.
+        emit('data', Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8'))
         emit('end')
       }, 0)
     }
@@ -513,6 +522,80 @@ console.log('\nsettings and play state:')
   const okRead = readSettings.code === 200 && JSON.parse(readSettings.body ?? '{}').settings !== undefined
   console.log(`  ${okRead ? 'ok  ' : 'FAIL'} GET /settings.json returns the panel payload (${readSettings.code})`)
   if (!okRead) failures.push('GET on the settings route must return the panel payload')
+
+  /* ---------------------------------------------------------------- uploads */
+
+  // The one route here that writes a file the user will later play, so it gets
+  // the most assertions. A 2 KB buffer is enough: the host stores bytes and never
+  // decodes the video, and this test must not add a 200 MB fixture to the repo.
+  const tiny = Buffer.alloc(2048, 7)
+  const up = await call(`${BASE}/upload?name=verify-clip.mp4`, 'POST', {}, tiny)
+  const upBody = JSON.parse(up.body ?? '{}')
+  const okUp = up.code === 200 && upBody.ok === true && upBody.bytes === tiny.length
+  console.log(
+    `  ${okUp ? 'ok  ' : 'FAIL'} POST /upload stores a clip (${up.code}, ${String(upBody.bytes)} bytes as ${String(upBody.file)})`,
+  )
+  if (!okUp) failures.push(`uploading a .mp4 must store it; got ${up.code} ${String(upBody.error ?? '')}`)
+
+  const listed = JSON.parse((await call(`${BASE}/videos.json`)).body ?? '{}')
+  const okListed = Array.isArray(listed.videos) && listed.videos.some((v) => v.id === upBody.id)
+  console.log(`  ${okListed ? 'ok  ' : 'FAIL'} the uploaded clip is listed by /videos.json`)
+  if (!okListed) failures.push('an uploaded clip must be listed, or the user cannot pick it')
+
+  const served = await call(`${BASE}/media/${encodeURIComponent(String(upBody.id))}`)
+  const okServed = served.code === 200 && served.bytes === tiny.length
+  console.log(
+    `  ${okServed ? 'ok  ' : 'FAIL'} the uploaded clip streams back byte-for-byte (${served.code}, ${String(served.bytes)} bytes)`,
+  )
+  if (!okServed) failures.push('an uploaded clip must be servable')
+
+  const badExt = await call(`${BASE}/upload?name=evil.txt`, 'POST', {}, tiny)
+  console.log(
+    `  ${badExt.code === 415 ? 'ok  ' : 'FAIL'} POST /upload refuses a non-video name -> ${badExt.code} (want 415)`,
+  )
+  if (badExt.code !== 415) failures.push(`a non-video upload answered ${badExt.code}, want 415`)
+
+  const traversal = await call(
+    `${BASE}/upload?name=${encodeURIComponent('../../escape.mp4')}`,
+    'POST',
+    {},
+    tiny,
+  )
+  const traversalFile = String(JSON.parse(traversal.body ?? '{}').file ?? '')
+  const okTraversal =
+    traversal.code === 200 &&
+    traversalFile !== '' &&
+    !traversalFile.includes('/') &&
+    !traversalFile.includes('\\') &&
+    !traversalFile.includes('..')
+  console.log(
+    `  ${okTraversal ? 'ok  ' : 'FAIL'} a traversal name is flattened to a leaf (${traversalFile})`,
+  )
+  if (!okTraversal) failures.push('an upload name must never escape the video folder')
+
+  const crossSite = await call(
+    `${BASE}/upload?name=x.mp4`,
+    'POST',
+    { 'sec-fetch-site': 'cross-site' },
+    tiny,
+  )
+  console.log(
+    `  ${crossSite.code === 403 ? 'ok  ' : 'FAIL'} POST /upload refuses a cross-site caller -> ${crossSite.code} (want 403)`,
+  )
+  if (crossSite.code !== 403) failures.push(`a cross-site upload answered ${crossSite.code}, want 403`)
+
+  const getUpload = await call(`${BASE}/upload?name=x.mp4`)
+  console.log(
+    `  ${getUpload.code === 405 ? 'ok  ' : 'FAIL'} GET /upload -> ${getUpload.code} (want 405)`,
+  )
+  if (getUpload.code !== 405) failures.push(`GET on the upload route answered ${getUpload.code}, want 405`)
+
+  const configAfter = JSON.parse((await call(`${BASE}/settings.json`)).body ?? '{}')
+  const okCap = configAfter.maxUploadBytes === 256 * 1024 * 1024
+  console.log(
+    `  ${okCap ? 'ok  ' : 'FAIL'} the panel is told the upload cap (${String(configAfter.maxUploadBytes)})`,
+  )
+  if (!okCap) failures.push('the config payload must carry maxUploadBytes')
 }
 
 console.log('')

@@ -38,6 +38,7 @@ import {
   resetState,
   saveSettings,
   selectClip as selectClipRoute,
+  uploadVideo,
   type ClipEntry,
   type ConfigPayload,
 } from './api.js'
@@ -245,6 +246,12 @@ export function SettingsPanel({
   const [tab, setTab] = useState<Tab>('triggers')
   const [msg, setMsg] = useState<{ text: string; kind: string }>({ text: '', kind: '' })
   const [busy, setBusy] = useState(false)
+  /** Which clip the panel's own player shows; null follows the current selection. */
+  const [preview, setPreview] = useState<string | null>(null)
+  /** Upload progress line; empty when nothing is in flight. */
+  const [note, setNote] = useState('')
+  const [dropHot, setDropHot] = useState(false)
+  const fileInput = useRef<HTMLInputElement | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -327,10 +334,69 @@ export function SettingsPanel({
     [load],
   )
 
+  /**
+   * Take one picked or dropped file.
+   *
+   * The size is checked here AND on the host: refusing a 2 GB mistake before
+   * spending a minute uploading it is the difference between a hint and a hang.
+   * The host stays the authority - it re-checks the cap, the extension and the
+   * name, because a browser-side check is a convenience, not a boundary.
+   */
+  const acceptFile = useCallback(
+    async (file: File | null | undefined) => {
+      if (file === null || file === undefined) return
+      const cap = config?.maxUploadBytes ?? 0
+      if (cap > 0 && file.size > cap) {
+        setMsg({ text: `文件太大：${formatBytes(file.size)}，上限 ${formatBytes(cap)}`, kind: 'dba-err' })
+        return
+      }
+      setBusy(true)
+      setNote('上传中 0%')
+      try {
+        const answer = await uploadVideo(file, (percent) => setNote(`上传中 ${String(percent)}%`))
+        setNote('')
+        if (answer.ok !== true) {
+          setMsg({ text: '上传失败：' + String(answer.error ?? '未知错误'), kind: 'dba-err' })
+          return
+        }
+        setMsg({
+          text: `已加入视频库：${String(answer.name ?? answer.file ?? file.name)}`,
+          kind: 'dba-ok',
+        })
+        await load()
+        // Select what was just uploaded: the whole point of the picker is to use it.
+        if (typeof answer.id === 'string' && answer.id !== '') {
+          await selectClipRoute(answer.id)
+          setPreview(answer.id)
+          await load()
+          await refreshConfig()
+        }
+      } catch (error: unknown) {
+        setNote('')
+        setMsg({ text: '上传失败：' + String(error), kind: 'dba-err' })
+      } finally {
+        setBusy(false)
+      }
+    },
+    [config, load],
+  )
+
   const settings = config?.settings ?? null
   const clips = config?.clips ?? []
   const state: BootState | null = config?.state ?? null
   const limits = config?.limits ?? SETTINGS_LIMITS
+
+  /**
+   * What the inline player shows: the last clip previewed, else the selected one,
+   * else whatever the host resolved. Never an empty box, because "what does the
+   * intro actually look like" is the question this panel exists to answer.
+   */
+  const previewClip: ClipEntry | null =
+    clips.find((clip) => clip.id === preview) ??
+    clips.find((clip) => clip.id === settings?.clipId) ??
+    clips.find((clip) => clip.id === config?.active?.id) ??
+    clips[0] ??
+    null
 
   const activeName =
     config === null
@@ -361,8 +427,23 @@ export function SettingsPanel({
     h(
       'div',
       {
-        className: 'dba-lib',
+        className: dropHot ? 'dba-lib dba-drop-hot' : 'dba-lib',
         onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+        // Drag and drop over the whole dialog: the file picker is for people who
+        // want one, and dropping a file on the panel is what everyone tries first.
+        onDragOver: (event: { preventDefault: () => void }) => {
+          event.preventDefault()
+          setDropHot(true)
+        },
+        onDragLeave: () => setDropHot(false),
+        onDrop: (event: {
+          preventDefault: () => void
+          dataTransfer?: { files?: FileList } | null
+        }) => {
+          event.preventDefault()
+          setDropHot(false)
+          void acceptFile(event.dataTransfer?.files?.[0] ?? null)
+        },
       },
       h('h3', null, '片头动画设置'),
       h(
@@ -704,6 +785,65 @@ export function SettingsPanel({
             'div',
             null,
             h('h4', null, '选一段作为片头'),
+            h(
+              'div',
+              { className: 'dba-upload' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dba-btn dba-panel dba-btn-preview',
+                  disabled: busy,
+                  onClick: () => fileInput.current?.click(),
+                },
+                '＋ 选择视频…',
+              ),
+              h(
+                'span',
+                { className: 'dba-meta' },
+                `或把文件拖进这个窗口 · 单个上限 ${formatBytes(config?.maxUploadBytes ?? 0)} · ${(config?.accepts ?? []).join(' ')}`,
+              ),
+              h('input', {
+                ref: fileInput,
+                type: 'file',
+                accept: (config?.accepts ?? []).join(','),
+                style: { display: 'none' },
+                onChange: (event: { target: { files?: FileList; value?: string } }) => {
+                  void acceptFile(event.target.files?.[0] ?? null)
+                  // Clear it, or picking the same file twice in a row does nothing.
+                  if (event.target.value !== undefined) event.target.value = ''
+                },
+              }),
+            ),
+            note === '' ? null : h('div', { className: 'dba-msg dba-ok' }, note),
+            // The player, not the full-screen trial: choosing a clip is a compare
+            // step, and an intro that covers the whole app cannot be compared.
+            previewClip === null
+              ? null
+              : h(
+                  'div',
+                  null,
+                  h('video', {
+                    key: previewClip.urls.media,
+                    className: 'dba-preview',
+                    src: previewClip.urls.media,
+                    controls: true,
+                    playsInline: true,
+                    preload: 'metadata',
+                  }),
+                  h(
+                    'div',
+                    { className: 'dba-meta dba-preview-cap' },
+                    `正在预览：${previewClip.name} · ${formatBytes(previewClip.bytes)}`,
+                    previewClip.faststart === false
+                      ? h(
+                          'span',
+                          { className: 'dba-badge dba-b-warn', title: '索引不在文件开头，首帧可能要等一下' },
+                          '建议 faststart',
+                        )
+                      : null,
+                  ),
+                ),
             ...(clips.length === 0
               ? [
                   h(
@@ -727,6 +867,18 @@ export function SettingsPanel({
                     h('span', { className: 'dba-nm' }, clip.name),
                     h('span', { className: 'dba-badge' }, SOURCE_LABEL[clip.source] ?? clip.source),
                     h('span', { className: 'dba-meta' }, formatBytes(clip.bytes)),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dba-btn dba-panel',
+                        onClick: (event: { stopPropagation: () => void }) => {
+                          event.stopPropagation()
+                          setPreview(clip.id)
+                        },
+                      },
+                      '预览',
+                    ),
                     h(
                       'button',
                       {
